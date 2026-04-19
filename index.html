@@ -1,0 +1,429 @@
+```react
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  signInWithCustomToken, 
+  onAuthStateChanged, 
+  signOut 
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  setDoc, 
+  onSnapshot, 
+  addDoc, 
+  deleteDoc, 
+  query 
+} from 'firebase/firestore';
+import { 
+  PieChart, 
+  Pie, 
+  Cell, 
+  ResponsiveContainer, 
+  Tooltip, 
+  BarChart, 
+  Bar, 
+  XAxis, 
+  YAxis, 
+  CartesianGrid 
+} from 'recharts';
+import { 
+  Wallet, 
+  PlusCircle, 
+  Trash2, 
+  LogOut, 
+  TrendingUp, 
+  TrendingDown, 
+  PieChart as PieIcon, 
+  BarChart3, 
+  CreditCard,
+  ChevronDown,
+  CalendarDays,
+  Search,
+  StickyNote
+} from 'lucide-react';
+
+// --- Firebase Configuration ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'budget-planner-app';
+
+const CATEGORIES = {
+  INCOME: [
+    'Gehalt / Lohn', 'Bonus / Weihnachtsgeld', 'Dividenden', 'Zinsen', 'Geschenke (Geld)', 
+    'Steuerrückerstattung', 'Mieteinnahmen', 'Verkäufe (Ebay/Vinted)', 'Kindergeld', 
+    'Bafög / Stipendium', 'Rente', 'Sonstige Einnahmen'
+  ],
+  FIXED: [
+    'Kaltmiete / Kreditrate', 'Nebenkosten', 'Strom', 'Gas / Heizung', 'Wasser / Abwasser', 'Müllabfuhr',
+    'TV-Versorgung / Kabelanschluss', 'Internet & Festnetz', 'Mobilfunk', 'GEZ (Rundfunkbeitrag)', 
+    'Streaming (Video)', 'Streaming (Musik)', 'Privathaftpflicht', 'Hausratversicherung', 
+    'Kfz-Versicherung', 'Berufsunfähigkeit', 'Rechtsschutz', 'Unfallversicherung', 
+    'Private Krankenkasse / Zusatz', 'Lebensversicherung', 'ÖPNV Ticket / Abo', 
+    'Bahncard', 'Leasingrate', 'Fitnessstudio', 'Vereinsbeiträge', 'Spenden (Dauerauftrag)', 
+    'Kontoführungsgebühren', 'Investition / Sparen', 'Altersvorsorge', 'Bausparvertrag'
+  ],
+  VARIABLE: [
+    'Lebensmittel', 'Getränke / Pfand', 'Drogerie / Hygiene', 'Reinigungsmittel', 'Haustierbedarf',
+    'Tanken (Benzin/Diesel)', 'Laden (Elektro)', 'Parkgebühren', 'Auto-Wartung / Reparatur', 'Fahrrad-Reparatur',
+    'Restaurant / Café', 'Imbiss / Fast Food', 'Lieferdienst', 'Kino / Theater / Konzerte', 'Gaming / Apps',
+    'Hobby / Sportartikel', 'Bücher / Zeitschriften', 'Tabak / E-Zigarette', 'Alkohol',
+    'Kleidung / Schuhe', 'Elektronik', 'Möbel & Deko', 'Haushaltsgeräte', 'Geschenke (Anlässe)',
+    'Apotheke / Medikamente', 'Friseur / Barbershop', 'Kosmetik / Wellness', 'Arztrechnung / Zuzahlung',
+    'Fortbildung / Kurse', 'Urlaub / Unterkunft', 'Flüge / Anreise', 'Ausflüge', 'Einzel-Investment', 'Sonstiges'
+  ]
+};
+
+const INTERVALS = [
+  { label: 'monatlich', value: 'monthly', factor: 1 },
+  { label: 'vierteljährlich', value: 'quarterly', factor: 0.333333 },
+  { label: 'halbjährlich', value: 'semi-annually', factor: 0.166666 },
+  { label: 'jährlich', value: 'annually', factor: 0.083333 }
+];
+
+const COLORS = [
+  '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', 
+  '#ec4899', '#06b6d4', '#71717a', '#fb923c', '#4ade80', 
+  '#2dd4bf', '#818cf8', '#f472b6', '#fb7185', '#22c55e', '#a855f7'
+];
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [transactions, setTransactions] = useState([]);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [formData, setFormData] = useState({
+    amount: '',
+    category: CATEGORIES.FIXED[0],
+    type: 'fixed',
+    interval: 'monthly',
+    note: ''
+  });
+
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Auth error:", error);
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    const q = collection(db, 'artifacts', appId, 'users', user.uid, 'transactions');
+    const unsubscribe = onSnapshot(q, 
+      (snapshot) => {
+        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setTransactions(data);
+      },
+      (error) => console.error("Firestore error:", error)
+    );
+    return () => unsubscribe();
+  }, [user]);
+
+  const getMonthlyAmount = (t) => {
+    const rawAmount = Number(t.amount);
+    const intervalObj = INTERVALS.find(i => i.value === (t.interval || 'monthly'));
+    return rawAmount * (intervalObj ? intervalObj.factor : 1);
+  };
+
+  const stats = useMemo(() => {
+    const income = transactions.filter(t => t.type === 'income').reduce((sum, t) => sum + getMonthlyAmount(t), 0);
+    const fixed = transactions.filter(t => t.type === 'fixed').reduce((sum, t) => sum + getMonthlyAmount(t), 0);
+    const variable = transactions.filter(t => t.type === 'variable').reduce((sum, t) => sum + getMonthlyAmount(t), 0);
+    const totalExpenses = fixed + variable;
+    const savings = Math.max(0, income - totalExpenses);
+
+    const categoryMap = {};
+    transactions.filter(t => t.type !== 'income').forEach(t => {
+      const monthly = getMonthlyAmount(t);
+      categoryMap[t.category] = (categoryMap[t.category] || 0) + monthly;
+    });
+    const pieData = Object.keys(categoryMap)
+      .map(name => ({ name, value: categoryMap[name] }))
+      .sort((a, b) => b.value - a.value);
+
+    const targetFixed = income * 0.5;
+    const targetVariable = income * 0.3;
+    const targetSavings = income * 0.2;
+
+    const barData = [
+      { name: 'Fix (50%)', Aktuell: fixed, Soll: targetFixed },
+      { name: 'Variabel (30%)', Aktuell: variable, Soll: targetVariable },
+      { name: 'Sparen (20%)', Aktuell: savings, Soll: targetSavings }
+    ];
+
+    return { income, fixed, variable, totalExpenses, savings, pieData, barData };
+  }, [transactions]);
+
+  const handleAddTransaction = async (e) => {
+    e.preventDefault();
+    if (!formData.amount || !user) return;
+    
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'transactions'), {
+        amount: parseFloat(formData.amount),
+        category: formData.category,
+        type: formData.type,
+        interval: formData.interval,
+        note: formData.note,
+        date: new Date().toISOString()
+      });
+      setFormData({ ...formData, amount: '', note: '' });
+    } catch (error) {
+      console.error("Error adding doc:", error);
+    }
+  };
+
+  const deleteTransaction = async (id) => {
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'transactions', id));
+    } catch (error) {
+      console.error("Error deleting doc:", error);
+    }
+  };
+
+  const filteredTransactions = useMemo(() => {
+    if (!searchTerm) return transactions;
+    return transactions.filter(t => 
+      t.category.toLowerCase().includes(searchTerm.toLowerCase()) || 
+      (t.note && t.note.toLowerCase().includes(searchTerm.toLowerCase()))
+    );
+  }, [transactions, searchTerm]);
+
+  if (loading) return (
+    <div className="flex items-center justify-center min-h-screen bg-slate-50">
+      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900 pb-12 font-sans">
+      <header className="bg-white border-b sticky top-0 z-20 px-4 py-3 flex justify-between items-center shadow-sm">
+        <div className="flex items-center gap-2">
+          <div className="bg-blue-600 p-2 rounded-xl text-white">
+            <Wallet size={24} />
+          </div>
+          <h1 className="font-bold text-xl tracking-tight">FinanzPlaner Pro</h1>
+        </div>
+        <button onClick={() => signOut(auth)} className="p-2 text-slate-400 hover:text-rose-600">
+          <LogOut size={20} />
+        </button>
+      </header>
+
+      <main className="max-w-5xl mx-auto p-4 space-y-6">
+        
+        {/* Quick Summary Section */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="bg-white p-4 rounded-3xl shadow-sm border border-slate-100">
+            <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">Einnahmen / mtl.</p>
+            <p className="text-lg font-bold text-emerald-600">+{stats.income.toLocaleString('de-DE', { minimumFractionDigits: 2 })}€</p>
+          </div>
+          <div className="bg-white p-4 rounded-3xl shadow-sm border border-slate-100">
+            <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">Ausgaben / mtl.</p>
+            <p className="text-lg font-bold text-rose-600">-{stats.totalExpenses.toLocaleString('de-DE', { minimumFractionDigits: 2 })}€</p>
+          </div>
+          <div className="bg-white p-4 rounded-3xl shadow-sm border border-slate-100">
+            <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">Bilanz / mtl.</p>
+            <p className={`text-lg font-bold ${stats.income - stats.totalExpenses >= 0 ? 'text-blue-600' : 'text-rose-600'}`}>
+              {(stats.income - stats.totalExpenses).toLocaleString('de-DE', { minimumFractionDigits: 2 })}€
+            </p>
+          </div>
+          <div className="bg-white p-4 rounded-3xl shadow-sm border border-slate-100">
+            <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">Sparrate</p>
+            <p className="text-lg font-bold text-amber-600">
+              {stats.income > 0 ? ((stats.savings / stats.income) * 100).toFixed(1) : 0}%
+            </p>
+          </div>
+        </div>
+
+        {/* Analytics Section */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <section className="bg-white p-6 rounded-[2.5rem] shadow-sm border border-slate-100 relative overflow-hidden">
+            <h2 className="font-bold mb-4 flex items-center gap-2">
+              <PieIcon className="text-blue-600" size={20} />
+              Ausgabenverteilung (mtl.)
+            </h2>
+            <div className="h-72 w-full relative">
+              {stats.pieData.length > 0 ? (
+                <>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={stats.pieData}
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={75}
+                        outerRadius={100}
+                        paddingAngle={4}
+                        dataKey="value"
+                        stroke="none"
+                      >
+                        {stats.pieData.map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                        ))}
+                      </Pie>
+                      <Tooltip 
+                        formatter={(value) => `${value.toFixed(2)}€`}
+                        contentStyle={{ borderRadius: '20px', border: 'none', boxShadow: '0 10px 25px rgba(0,0,0,0.05)', fontWeight: 'bold' }}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                  <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-center pointer-events-none w-full">
+                    <div className="flex flex-col items-center justify-center">
+                      <span className="text-[9px] font-black uppercase text-slate-400 tracking-tighter">Budget Balance</span>
+                      <div className="flex flex-col gap-0.5 mt-1">
+                        <span className="text-xs font-bold text-emerald-600">+{stats.income.toLocaleString('de-DE', { maximumFractionDigits: 0 })}€</span>
+                        <div className="w-8 h-[1px] bg-slate-100 mx-auto my-0.5"></div>
+                        <span className="text-xs font-bold text-rose-500">-{stats.totalExpenses.toLocaleString('de-DE', { maximumFractionDigits: 0 })}€</span>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="h-full flex flex-col items-center justify-center text-slate-300 gap-3">
+                   <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center">
+                      <PieIcon size={24} />
+                   </div>
+                   <p className="text-sm font-medium">Keine Buchungsdaten vorhanden</p>
+                </div>
+              )}
+            </div>
+          </section>
+
+          <section className="bg-white p-6 rounded-[2.5rem] shadow-sm border border-slate-100">
+            <h2 className="font-bold mb-4 flex items-center gap-2">
+              <BarChart3 className="text-blue-600" size={20} />
+              Finanzielle Balance
+            </h2>
+            <div className="h-72 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={stats.barData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                  <XAxis dataKey="name" fontSize={11} fontWeight="bold" axisLine={false} tickLine={false} tick={{fill: '#94a3b8'}} />
+                  <YAxis fontSize={10} axisLine={false} tickLine={false} tick={{fill: '#94a3b8'}} />
+                  <Tooltip 
+                    cursor={{fill: '#f8fafc'}}
+                    contentStyle={{ borderRadius: '15px', border: 'none', boxShadow: '0 10px 25px rgba(0,0,0,0.05)' }}
+                  />
+                  <Bar dataKey="Aktuell" fill="#3b82f6" radius={[6, 6, 0, 0]} barSize={32} />
+                  <Bar dataKey="Soll" fill="#e2e8f0" radius={[6, 6, 0, 0]} barSize={32} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </section>
+        </div>
+
+        {/* Action: Add Transaction */}
+        <section className="bg-white p-6 rounded-[2.5rem] shadow-sm border border-slate-100">
+          <h2 className="font-bold mb-6 flex items-center gap-2 text-slate-800">
+            <PlusCircle size={20} className="text-blue-600" />
+            Neue Buchung
+          </h2>
+          <form onSubmit={handleAddTransaction} className="space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-2 ml-1">Betrag (€)</label>
+                <input
+                  type="number" step="0.01" required
+                  className="w-full bg-slate-50 border-none rounded-2xl p-4 focus:ring-2 focus:ring-blue-500 outline-none font-bold text-xl"
+                  placeholder="0,00"
+                  value={formData.amount}
+                  onChange={(e) => setFormData({...formData, amount: e.target.value})}
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-2 ml-1">Turnus</label>
+                <div className="relative">
+                  <select
+                    className="w-full appearance-none bg-slate-50 border-none rounded-2xl p-4 pr-10 focus:ring-2 focus:ring-blue-500 outline-none font-semibold cursor-pointer"
+                    value={formData.interval}
+                    onChange={(e) => setFormData({...formData, interval: e.target.value})}
+                  >
+                    {INTERVALS.map(i => <option key={i.value} value={i.value}>{i.label}</option>)}
+                  </select>
+                  <CalendarDays className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" size={18} />
+                </div>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-2 ml-1">Kostenart</label>
+                <div className="flex bg-slate-100 p-1.5 rounded-2xl gap-1">
+                  {['fixed', 'variable', 'income'].map((type) => (
+                    <button
+                      key={type} type="button"
+                      onClick={() => {
+                        const cat = type === 'income' ? CATEGORIES.INCOME[0] : (type === 'fixed' ? CATEGORIES.FIXED[0] : CATEGORIES.VARIABLE[0]);
+                        setFormData({...formData, type, category: cat});
+                      }}
+                      className={`flex-1 py-2.5 px-1 rounded-xl text-[10px] font-black transition-all uppercase tracking-tight ${formData.type === type ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500'}`}
+                    >
+                      {type === 'fixed' ? 'Fix' : (type === 'variable' ? 'Var.' : 'Ein.')}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-2 ml-1">Kategorie</label>
+                <div className="relative">
+                  <select
+                    className="w-full appearance-none bg-slate-50 border-none rounded-2xl p-4 pr-10 focus:ring-2 focus:ring-blue-500 outline-none font-semibold cursor-pointer text-sm"
+                    value={formData.category}
+                    onChange={(e) => setFormData({...formData, category: e.target.value})}
+                  >
+                    {formData.type === 'income' && CATEGORIES.INCOME.map(c => <option key={c} value={c}>{c}</option>)}
+                    {formData.type === 'fixed' && CATEGORIES.FIXED.map(c => <option key={c} value={c}>{c}</option>)}
+                    {formData.type === 'variable' && CATEGORIES.VARIABLE.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                  <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" size={18} />
+                </div>
+              </div>
+            </div>
+            
+            <div className="relative">
+              <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-2 ml-1">Notiz (Optional)</label>
+              <div className="relative">
+                <StickyNote className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
+                <input
+                  type="text"
+                  placeholder="z.B. Depot-Einzahlung, Vertragsdetails..."
+                  className="w-full bg-slate-50 border-none rounded-2xl p-4 pl-12 focus:ring-2 focus:ring-blue-500 outline-none font-medium text-sm"
+                  value={formData.note}
+                  onChange={(e) => setFormData({...formData, note: e.target.value})}
+                />
+              </div>
+            </div>
+
+            <button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-4 rounded-2xl shadow-xl shadow-blue-100 active:scale-[0.99] uppercase tracking-widest">
+              Buchung hinzufügen
+            </button>
+          </form>
+        </section>
+
+        {/* Transactions List */}
+        <section className="bg-white rounded-[2.5rem] shadow-sm border border-slate-100 overflow-hidden">
+          <div className="p-6 border-b border-slate-50 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white sticky top-0 z-10">
+            <h2 className="font-bold">Umsätze</h2>
+            <div className="relative w-full sm:w-64">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+              <input 
+                type="text" placeholder="Notizen oder Kategorien suchen..."
+                className="w-full bg-slate-50 border-none rounded-xl py-2 pl-10 pr-4 text-sm focus:ring-2 focus:ring-blue-100 outline-none"
+                value={searchTerm}
+                
